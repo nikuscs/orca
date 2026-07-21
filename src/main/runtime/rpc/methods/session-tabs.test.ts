@@ -8,6 +8,14 @@ function makeRequest(method: string, params?: unknown): RpcRequest {
   return { id: 'req-1', authToken: 'tok', method, params }
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
 describe('session tab RPC methods', () => {
   it('routes mobile-only activation without notifying desktop clients', async () => {
     const runtime = {
@@ -365,6 +373,103 @@ describe('session tab RPC methods', () => {
     expect(runtime.createMobileSessionTerminal).not.toHaveBeenCalled()
   })
 
+  it('replays a worktree mutation that lands while the initial snapshot is listing', async () => {
+    const initial = deferred<Awaited<ReturnType<OrcaRuntimeService['listMobileSessionTabs']>>>()
+    let listener: ((snapshot: Awaited<typeof initial.promise>) => void) | undefined
+    const runtime = {
+      getRuntimeId: () => 'test-runtime',
+      listMobileSessionTabs: vi.fn(() => initial.promise),
+      onMobileSessionTabsChanged: vi.fn((next: typeof listener) => {
+        listener = next
+        return vi.fn()
+      }),
+      registerSubscriptionCleanup: vi.fn()
+    } as unknown as OrcaRuntimeService
+    const dispatcher = new RpcDispatcher({ runtime, methods: SESSION_TAB_METHODS })
+    const messages: string[] = []
+    const pending = dispatcher.dispatchStreaming(
+      makeRequest('session.tabs.subscribe', { worktree: 'id:wt-1' }),
+      (message) => messages.push(message),
+      { connectionId: 'conn-1' }
+    )
+
+    await vi.waitFor(() => expect(listener).toBeDefined())
+    listener?.({
+      worktree: 'wt-1',
+      publicationEpoch: 'epoch-1',
+      snapshotVersion: 2,
+      activeGroupId: null,
+      activeTabId: 'tab-2',
+      activeTabType: 'terminal',
+      tabs: []
+    })
+    initial.resolve({
+      worktree: 'wt-1',
+      publicationEpoch: 'epoch-1',
+      snapshotVersion: 1,
+      activeGroupId: null,
+      activeTabId: 'tab-1',
+      activeTabType: 'terminal',
+      tabs: []
+    })
+    await pending
+
+    expect(messages.map((message) => JSON.parse(message).result)).toEqual([
+      expect.objectContaining({ type: 'snapshot', snapshotVersion: 1 }),
+      expect.objectContaining({ type: 'updated', snapshotVersion: 2 })
+    ])
+  })
+
+  it('replays an all-worktree mutation that lands while the initial inventory is listing', async () => {
+    const initial = deferred<Awaited<ReturnType<OrcaRuntimeService['listAllMobileSessionTabs']>>>()
+    let listener: ((snapshot: Awaited<typeof initial.promise>[number]) => void) | undefined
+    const runtime = {
+      getRuntimeId: () => 'test-runtime',
+      listAllMobileSessionTabs: vi.fn(() => initial.promise),
+      onMobileSessionTabsChanged: vi.fn((next: typeof listener) => {
+        listener = next
+        return vi.fn()
+      }),
+      registerSubscriptionCleanup: vi.fn(),
+      cleanupSubscription: vi.fn()
+    } as unknown as OrcaRuntimeService
+    const dispatcher = new RpcDispatcher({ runtime, methods: SESSION_TAB_METHODS })
+    const messages: string[] = []
+    const pending = dispatcher.dispatchStreaming(
+      makeRequest('session.tabs.subscribeAll'),
+      (message) => messages.push(message),
+      { connectionId: 'conn-1' }
+    )
+
+    await vi.waitFor(() => expect(listener).toBeDefined())
+    listener?.({
+      worktree: 'wt-1',
+      publicationEpoch: 'epoch-1',
+      snapshotVersion: 2,
+      activeGroupId: null,
+      activeTabId: 'tab-2',
+      activeTabType: 'terminal',
+      tabs: []
+    })
+    initial.resolve([
+      {
+        worktree: 'wt-1',
+        publicationEpoch: 'epoch-1',
+        snapshotVersion: 1,
+        activeGroupId: null,
+        activeTabId: 'tab-1',
+        activeTabType: 'terminal',
+        tabs: []
+      }
+    ])
+    await pending
+
+    expect(messages.map((message) => JSON.parse(message).result)).toEqual([
+      expect.objectContaining({ type: 'snapshots' }),
+      expect.objectContaining({ type: 'updated', snapshotVersion: 2 })
+    ])
+  })
+
   it('streams all known session tab snapshots and later updates', async () => {
     const unsubscribe = vi.fn()
     const listeners: ((snapshot: unknown) => void)[] = []
@@ -464,20 +569,22 @@ describe('session tab RPC methods', () => {
     )
   })
 
-  it('registers session tab subscription cleanup with the resolved worktree id', async () => {
+  it('registers session tab cleanup before resolving initial inventory', async () => {
+    const listMobileSessionTabs = vi.fn().mockResolvedValue({
+      worktree: 'wt-1',
+      publicationEpoch: 'epoch-1',
+      snapshotVersion: 1,
+      activeGroupId: null,
+      activeTabId: null,
+      activeTabType: null,
+      tabs: []
+    })
+    const registerSubscriptionCleanup = vi.fn()
     const runtime = {
       getRuntimeId: () => 'test-runtime',
-      listMobileSessionTabs: vi.fn().mockResolvedValue({
-        worktree: 'wt-1',
-        publicationEpoch: 'epoch-1',
-        snapshotVersion: 1,
-        activeGroupId: null,
-        activeTabId: null,
-        activeTabType: null,
-        tabs: []
-      }),
+      listMobileSessionTabs,
       onMobileSessionTabsChanged: vi.fn(() => vi.fn()),
-      registerSubscriptionCleanup: vi.fn()
+      registerSubscriptionCleanup
     } as unknown as OrcaRuntimeService
     const dispatcher = new RpcDispatcher({ runtime, methods: SESSION_TAB_METHODS })
 
@@ -488,14 +595,12 @@ describe('session tab RPC methods', () => {
     )
 
     expect(runtime.registerSubscriptionCleanup).toHaveBeenCalledWith(
-      'session.tabs:conn-1:wt-1:req-1',
+      'session.tabs:conn-1:id:wt-1:req-1',
       expect.any(Function),
       'conn-1'
     )
-    expect(runtime.registerSubscriptionCleanup).not.toHaveBeenCalledWith(
-      'session.tabs:conn-1:id:wt-1',
-      expect.any(Function),
-      'conn-1'
+    expect(registerSubscriptionCleanup.mock.invocationCallOrder[0]!).toBeLessThan(
+      listMobileSessionTabs.mock.invocationCallOrder[0]!
     )
   })
 
@@ -528,7 +633,7 @@ describe('session tab RPC methods', () => {
     )
 
     expect(runtime.registerSubscriptionCleanup).toHaveBeenCalledWith(
-      'session.tabs:conn-1:wt-1:sub-1',
+      'session.tabs:conn-1:id:wt-1:sub-1',
       expect.any(Function),
       'conn-1'
     )
@@ -596,6 +701,7 @@ describe('session tab RPC methods', () => {
       { connectionId: 'conn-1' }
     )
 
+    expect(cleanupSubscription).toHaveBeenCalledWith('session.tabs:conn-1:id:wt-1:sub-1')
     expect(cleanupSubscription).toHaveBeenCalledWith('session.tabs:conn-1:wt-1:sub-1')
     expect(cleanupSubscriptionsByPrefix).not.toHaveBeenCalled()
   })

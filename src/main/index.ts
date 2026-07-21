@@ -2003,6 +2003,9 @@ app.whenReady().then(async () => {
     // Why: worktree.ps pulls hook-reported agent status (same source as the desktop sidebar) at query time so mobile shows the same agents.
     getAgentStatusSnapshot: () =>
       agentHookServer.getStatusSnapshot().filter((entry) => entry.providerSessionOnly !== true),
+    // Why: terminal close must retire persisted hook rows too, or completed agents can reappear in worktree.ps after a restart with no live tab.
+    dropAgentStatusEntriesByTabPrefix: (tabId) =>
+      agentHookServer.dropStatusEntriesByTabPrefix(tabId),
     // Why: source codex-home here (runs in window AND serve) so aiVault.listSessions includes managed-Codex sessions; registerCoreHandlers is window-only.
     getAdditionalAiVaultCodexHomePaths: () =>
       codexRuntimeHome ? codexRuntimeHome.getHostCodexHomePathsForSessionDiscovery() : [],

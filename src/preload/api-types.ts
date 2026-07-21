@@ -15,9 +15,11 @@ import type {
   TerminalPreviewDataPayload
 } from '../shared/terminal-preview'
 import type {
+  SessionTabCloseRequest,
+  SessionTabCloseResponse,
   TerminalTabCloseRequest,
   TerminalTabCloseResponse
-} from '../shared/terminal-tab-close'
+} from '../shared/renderer-tab-close'
 import type {
   LocalLogTailChangedPayload,
   LocalLogTailReadArgs,
@@ -65,6 +67,7 @@ import type { ProjectExecutionRuntimeResolution } from '../shared/project-execut
 import type { StartupCommandDelivery } from '../shared/codex-startup-delivery'
 import type {
   AgentProviderSessionMetadata,
+  LiveAgentSessionOwner,
   SleepingAgentLaunchConfig
 } from '../shared/agent-session-resume'
 import type {
@@ -1324,6 +1327,7 @@ export type PreloadApi = {
       sessionExpired?: boolean
       coldRestore?: { scrollback: string; cwd: string; cols?: number; rows?: number }
       startupCwdFallback?: { kind: 'worktree'; cwd: string }
+      existingAgentSessionOwner?: LiveAgentSessionOwner
     }>
     write: (id: string, data: string) => void
     writeAccepted: (id: string, data: string) => Promise<boolean>
@@ -2966,6 +2970,8 @@ export type PreloadApi = {
     ) => () => void
     onTerminalTabCloseRequest: (callback: (request: TerminalTabCloseRequest) => void) => () => void
     respondTerminalTabClose: (response: TerminalTabCloseResponse) => void
+    onSessionTabCloseRequest: (callback: (request: SessionTabCloseRequest) => void) => () => void
+    respondSessionTabClose: (response: SessionTabCloseResponse) => void
     onSleepWorktree: (callback: (data: { worktreeId: string }) => void) => () => void
     onResumeSleepingAgents: (callback: (data: { worktreeId: string }) => void) => () => void
     onTerminalZoom: (callback: (direction: 'in' | 'out' | 'reset') => void) => () => void
