@@ -938,44 +938,42 @@ describe('connectPanePty', () => {
     resetAgentStartupDelayedDeliveryForTests()
   })
 
-  it('reveals the existing owner when main rejects a duplicate agent resume', async () => {
+  it('reveals an existing owner materialized while a duplicate agent resume resolves', async () => {
     const { connectPanePty } = await import('./pty-connection')
     const transport = createMockTransport()
-    transport.connect.mockResolvedValue({
-      id: 'pty-owner',
-      existingAgentSessionOwner: {
-        ptyId: 'pty-owner',
-        paneKey: 'owner-tab:11111111-1111-4111-8111-111111111111',
-        tabId: 'owner-tab',
-        leafId: '11111111-1111-4111-8111-111111111111'
-      }
-    })
     transportFactoryQueue.push(transport)
     const closeTab = vi.fn()
     const setActiveTab = vi.fn()
     mockStoreState = {
       ...mockStoreState,
-      tabsByWorktree: {
-        'wt-1': [
-          { id: 'tab-1', ptyId: null },
-          { id: 'owner-tab', ptyId: 'pty-owner' }
-        ]
-      },
+      tabsByWorktree: { 'wt-1': [{ id: 'tab-1', ptyId: null }] },
       closeTab,
       setActiveTab
     } as StoreState
-
-    connectPanePty(
-      createPane(1) as never,
-      createManager(1) as never,
-      createDeps({
-        startup: {
-          command: 'codex resume provider-session-a',
-          launchAgent: 'codex',
-          resumeProviderSession: { key: 'session_id', id: 'provider-session-a' }
+    transport.connect.mockImplementation(async () => {
+      mockStoreState.tabsByWorktree['wt-1'] = [
+        { id: 'tab-1', ptyId: null },
+        { id: 'owner-tab', ptyId: 'pty-owner' }
+      ]
+      return {
+        id: 'pty-owner',
+        existingAgentSessionOwner: {
+          ptyId: 'pty-owner',
+          paneKey: 'owner-tab:11111111-1111-4111-8111-111111111111',
+          tabId: 'owner-tab',
+          leafId: '11111111-1111-4111-8111-111111111111'
         }
-      }) as never
-    )
+      }
+    })
+    const deps = createDeps({
+      startup: {
+        command: 'codex resume provider-session-a',
+        launchAgent: 'codex',
+        resumeProviderSession: { key: 'session_id', id: 'provider-session-a' }
+      }
+    })
+
+    connectPanePty(createPane(1) as never, createManager(1) as never, deps as never)
     await flushAsyncTicks()
 
     expect(closeTab).toHaveBeenCalledWith('tab-1', {
@@ -983,6 +981,7 @@ describe('connectPanePty', () => {
       captureRecentlyClosed: false
     })
     expect(setActiveTab).toHaveBeenCalledWith('owner-tab')
+    expect(deps.onPtyErrorRef.current).not.toHaveBeenCalled()
     expect((transport.getPtyId as () => string | null)()).toBeNull()
   })
 

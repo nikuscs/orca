@@ -40,10 +40,12 @@ export function isWebRuntimeSessionActive(
 }
 
 const pendingWebRuntimeSplitMirrorTelemetry = new Map<string, Set<string>>()
+// Why: empty-session bootstrap and user clicks race before host snapshots arrive; one default shell satisfies both.
+const pendingDefaultWebRuntimeTerminalCreates = new Map<string, Promise<boolean>>()
 const WEB_RUNTIME_SPLIT_MIRROR_SUPPRESSION_TTL_MS = 30_000
 let pendingWebRuntimeSplitMirrorTelemetryId = 0
 
-export async function createWebRuntimeSessionTerminal(args: {
+type CreateWebRuntimeSessionTerminalArgs = {
   worktreeId: string
   environmentId?: string | null
   afterTabId?: string
@@ -59,15 +61,56 @@ export async function createWebRuntimeSessionTerminal(args: {
   viewMode?: 'terminal' | 'chat'
   activate?: boolean
   selectWorktree?: boolean
-}): Promise<boolean> {
+}
+
+export function createWebRuntimeSessionTerminal(
+  args: CreateWebRuntimeSessionTerminalArgs
+): Promise<boolean> {
   const environmentId =
     args.environmentId?.trim() ??
     useAppStore.getState().settings?.activeRuntimeEnvironmentId?.trim() ??
     null
   if (!environmentId || !isWebRuntimeSessionActive(environmentId)) {
-    return false
+    return Promise.resolve(false)
+  }
+  if (!isDefaultWebRuntimeTerminalCreate(args)) {
+    return createWebRuntimeSessionTerminalRequest(args, environmentId)
   }
 
+  const key = `${environmentId}\u0000${args.worktreeId}`
+  const existing = pendingDefaultWebRuntimeTerminalCreates.get(key)
+  if (existing) {
+    return existing
+  }
+  const pending = createWebRuntimeSessionTerminalRequest(args, environmentId)
+  pendingDefaultWebRuntimeTerminalCreates.set(key, pending)
+  void pending.finally(() => {
+    if (pendingDefaultWebRuntimeTerminalCreates.get(key) === pending) {
+      pendingDefaultWebRuntimeTerminalCreates.delete(key)
+    }
+  })
+  return pending
+}
+
+function isDefaultWebRuntimeTerminalCreate(args: CreateWebRuntimeSessionTerminalArgs): boolean {
+  // Why: bootstrap and tab-bar calls can request different placement, but neither expresses a distinct shell command.
+  return (
+    args.command === undefined &&
+    args.cwd === undefined &&
+    args.env === undefined &&
+    args.envToDelete === undefined &&
+    args.startupCommandDelivery === undefined &&
+    args.launchConfig === undefined &&
+    args.agent === undefined &&
+    args.launchAgent === undefined &&
+    args.viewMode === undefined
+  )
+}
+
+async function createWebRuntimeSessionTerminalRequest(
+  args: CreateWebRuntimeSessionTerminalArgs,
+  environmentId: string
+): Promise<boolean> {
   if (args.selectWorktree !== false) {
     selectWebRuntimeSessionWorktree(args.worktreeId)
   }
@@ -245,9 +288,10 @@ function findLocalBrowserPageForRemotePage(
   return null
 }
 
-async function refreshWebRuntimeSessionTabsSnapshot(
+export async function refreshWebRuntimeSessionTabsSnapshot(
   environmentId: string,
-  worktreeId: string
+  worktreeId: string,
+  options: { acceptCurrentVersion?: boolean } = {}
 ): Promise<void> {
   try {
     const response = await window.api.runtimeEnvironments.call({
@@ -261,8 +305,15 @@ async function refreshWebRuntimeSessionTabsSnapshot(
     const snapshot = unwrapRuntimeRpcResult(
       response as RuntimeRpcResponse<RuntimeMobileSessionTabsResult>
     )
-    const { applyFreshWebSessionTabsSnapshot, applyWebSessionTabsStorePatch } =
-      await import('./web-session-tabs-sync')
+    const {
+      acceptReplayedWebSessionTabsSnapshot,
+      applyFreshWebSessionTabsSnapshot,
+      applyWebSessionTabsStorePatch
+    } = await import('./web-session-tabs-sync')
+    if (options.acceptCurrentVersion) {
+      // Why: a live reused owner proves the local projection may have lost an already-accepted snapshot; allow that exact host version to materialize again.
+      acceptReplayedWebSessionTabsSnapshot(environmentId, snapshot.worktree)
+    }
     applyWebSessionTabsStorePatch((state) => {
       // Why: eager refreshes can resolve after the user switched worktrees; update tabs without stealing focus.
       const patch = applyFreshWebSessionTabsSnapshot(state, snapshot, environmentId)
@@ -271,7 +322,7 @@ async function refreshWebRuntimeSessionTabsSnapshot(
   } catch (error) {
     // Why: host creation already succeeded; the long-lived session.tabs subscription catches up if this eager refresh fails.
     console.warn(
-      '[web-runtime-session] failed to refresh browser tab snapshot:',
+      '[web-runtime-session] failed to refresh session tabs snapshot:',
       error instanceof Error ? error.message : String(error)
     )
   }

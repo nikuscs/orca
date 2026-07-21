@@ -39,7 +39,7 @@ const RUNTIME_ENVIRONMENT_HANDLER_CHANNELS = [
 type RetainedRemoteRuntimeSubscription = RemoteRuntimeSubscription & {
   environmentId: string
   ownerWebContentsId: number
-  removeDestroyedListener: () => void
+  removeOwnerListeners: () => void
 }
 const remoteRuntimeSubscriptions = new Map<string, RetainedRemoteRuntimeSubscription>()
 
@@ -168,29 +168,44 @@ export function registerRuntimeEnvironmentHandlers(store: Store): void {
       const environment = resolveEnvironment(getUserDataPath(), args.selector)
       const sender = event.sender
       const ownerWebContentsId = sender.id
-      let senderDestroyed = sender.isDestroyed()
+      let ownerReleased = sender.isDestroyed()
       let subscription: RemoteRuntimeSubscription | null = null
-      let destroyedListenerAttached = false
-      const removeDestroyedListener = (): void => {
-        if (!destroyedListenerAttached) {
+      let ownerListenersAttached = false
+      const removeOwnerListeners = (): void => {
+        if (!ownerListenersAttached) {
           return
         }
-        destroyedListenerAttached = false
+        ownerListenersAttached = false
         sender.removeListener('destroyed', closeSubscription)
+        sender.removeListener('render-process-gone', closeSubscription)
+        sender.removeListener('did-start-navigation', closeSubscriptionOnNavigation)
       }
       const closeSubscription = (): void => {
-        senderDestroyed = true
+        ownerReleased = true
         const retained = remoteRuntimeSubscriptions.get(subscriptionId) ?? null
         remoteRuntimeSubscriptions.delete(subscriptionId)
         if (retained) {
           retained.close()
           return
         }
-        removeDestroyedListener()
+        removeOwnerListeners()
         subscription?.close()
       }
+      const closeSubscriptionOnNavigation = (
+        _event: unknown,
+        _url: string,
+        isInPlace: boolean,
+        isMainFrame: boolean
+      ): void => {
+        if (isMainFrame && !isInPlace) {
+          closeSubscription()
+        }
+      }
+      // Why: reloads and renderer crashes reuse the WebContents, so `destroyed` alone leaks the old document's remote streams into its replacement.
       sender.once('destroyed', closeSubscription)
-      destroyedListenerAttached = true
+      sender.once('render-process-gone', closeSubscription)
+      sender.on?.('did-start-navigation', closeSubscriptionOnNavigation)
+      ownerListenersAttached = true
       try {
         subscription = await subscribeRuntimeEnvironment(
           getUserDataPath(),
@@ -209,17 +224,17 @@ export function registerRuntimeEnvironmentHandlers(store: Store): void {
             },
             onClose: () => {
               const retained = remoteRuntimeSubscriptions.get(subscriptionId) ?? null
-              retained?.removeDestroyedListener()
+              retained?.removeOwnerListeners()
               remoteRuntimeSubscriptions.delete(subscriptionId)
             }
           }
         )
       } catch (error) {
-        removeDestroyedListener()
+        removeOwnerListeners()
         throw error
       }
-      if (senderDestroyed || sender.isDestroyed()) {
-        removeDestroyedListener()
+      if (ownerReleased || sender.isDestroyed()) {
+        removeOwnerListeners()
         subscription.close()
         return { subscriptionId, requestId: subscription.requestId }
       }
@@ -227,10 +242,10 @@ export function registerRuntimeEnvironmentHandlers(store: Store): void {
         requestId: subscription.requestId,
         environmentId: environment.id,
         ownerWebContentsId,
-        removeDestroyedListener,
+        removeOwnerListeners,
         sendBinary: (bytes) => subscription?.sendBinary(bytes) ?? false,
         close: () => {
-          removeDestroyedListener()
+          removeOwnerListeners()
           subscription?.close()
         }
       })

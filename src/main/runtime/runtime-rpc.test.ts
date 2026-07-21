@@ -1476,6 +1476,16 @@ describe('OrcaRuntimeRpcServer', () => {
     )
     await server['handleWebSocketMessage'](
       JSON.stringify({
+        id: 'req_worktree_sleep',
+        method: 'worktree.sleep',
+        deviceToken: mobile.token,
+        params: { worktree: 'id:wt-1' }
+      }),
+      (response) => replies.push(JSON.parse(response) as Record<string, unknown>),
+      () => {}
+    )
+    await server['handleWebSocketMessage'](
+      JSON.stringify({
         id: 'req_allowed',
         method: 'status.get',
         deviceToken: mobile.token
@@ -2137,6 +2147,13 @@ describe('OrcaRuntimeRpcServer', () => {
     expect(replies).toContainEqual(
       expect.objectContaining({
         id: 'req_forbidden',
+        ok: false,
+        error: expect.objectContaining({ code: 'forbidden' })
+      })
+    )
+    expect(replies).toContainEqual(
+      expect.objectContaining({
+        id: 'req_worktree_sleep',
         ok: false,
         error: expect.objectContaining({ code: 'forbidden' })
       })

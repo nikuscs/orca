@@ -11,6 +11,7 @@ import {
   createWebRuntimeSessionTerminal,
   isWebRuntimeSessionActive,
   moveWebRuntimeSessionTab,
+  refreshWebRuntimeSessionTabsSnapshot,
   setWebRuntimeTabProps,
   splitWebRuntimeTerminal
 } from './web-runtime-session'
@@ -22,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   createBrowserTab: vi.fn(),
   setRemoteBrowserPageHandle: vi.fn(),
   focusBrowserTabInWorktree: vi.fn(),
+  acceptReplayedWebSessionTabsSnapshot: vi.fn(),
   applyFreshWebSessionTabsSnapshot: vi.fn(),
   resolveHostSessionTabIdForWebSessionTab: vi.fn(),
   trackTerminalPaneSplit: vi.fn(),
@@ -36,6 +38,7 @@ vi.mock('../store', () => ({
 }))
 
 vi.mock('./web-session-tabs-sync', () => ({
+  acceptReplayedWebSessionTabsSnapshot: mocks.acceptReplayedWebSessionTabsSnapshot,
   applyFreshWebSessionTabsSnapshot: mocks.applyFreshWebSessionTabsSnapshot,
   applyWebSessionTabsStorePatch: (buildPatch: (state: unknown) => unknown) =>
     mocks.setState(buildPatch),
@@ -64,6 +67,42 @@ function makeSnapshot(): RuntimeMobileSessionTabsResult {
     tabs: []
   }
 }
+
+describe('refreshWebRuntimeSessionTabsSnapshot', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+  })
+
+  it('allows the current authoritative version to restore a lost owner projection', async () => {
+    const snapshot = makeSnapshot()
+    mocks.setState.mockImplementation((updater: (state: unknown) => unknown) =>
+      updater({ state: 'before' })
+    )
+    mocks.applyFreshWebSessionTabsSnapshot.mockReturnValue({ state: 'after' })
+    const runtimeCall = vi.fn().mockResolvedValue({ ok: true, result: snapshot })
+    vi.stubGlobal('window', {
+      api: { runtimeEnvironments: { call: runtimeCall } }
+    })
+
+    await refreshWebRuntimeSessionTabsSnapshot(ENVIRONMENT_ID, WORKTREE_ID, {
+      acceptCurrentVersion: true
+    })
+
+    expect(mocks.acceptReplayedWebSessionTabsSnapshot).toHaveBeenCalledWith(
+      ENVIRONMENT_ID,
+      WORKTREE_ID
+    )
+    expect(mocks.applyFreshWebSessionTabsSnapshot).toHaveBeenCalledWith(
+      { state: 'before' },
+      snapshot,
+      ENVIRONMENT_ID
+    )
+    expect(mocks.acceptReplayedWebSessionTabsSnapshot.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.applyFreshWebSessionTabsSnapshot.mock.invocationCallOrder[0]!
+    )
+  })
+})
 
 describe('activateWebRuntimeSessionWorktree', () => {
   beforeEach(() => {
@@ -533,6 +572,129 @@ describe('createWebRuntimeSessionTerminal', () => {
       snapshot,
       ENVIRONMENT_ID
     )
+  })
+
+  it('shares one default terminal create while empty-session bootstrap and user input overlap', async () => {
+    let resolveCreate: (value: unknown) => void = () => {}
+    const pendingCreate = new Promise((resolve) => {
+      resolveCreate = resolve
+    })
+    const runtimeCall = vi.fn((args: { method: string }) => {
+      if (args.method === 'session.tabs.createTerminal') {
+        return pendingCreate
+      }
+      return Promise.resolve({ id: 'list', ok: true, result: makeSnapshot() })
+    })
+    vi.stubGlobal('window', {
+      api: { runtimeEnvironments: { call: runtimeCall } }
+    })
+
+    const automaticBootstrap = createWebRuntimeSessionTerminal({
+      worktreeId: WORKTREE_ID,
+      environmentId: ENVIRONMENT_ID,
+      activate: true,
+      selectWorktree: false
+    })
+    const userCreate = createWebRuntimeSessionTerminal({
+      worktreeId: WORKTREE_ID,
+      environmentId: ENVIRONMENT_ID,
+      targetGroupId: 'group-left',
+      activate: true
+    })
+
+    expect(
+      runtimeCall.mock.calls.filter(([args]) => args.method === 'session.tabs.createTerminal')
+    ).toHaveLength(1)
+    resolveCreate({
+      id: 'create-terminal',
+      ok: true,
+      result: {
+        tab: {
+          type: 'terminal',
+          id: 'host-tab-2::leaf-1',
+          parentTabId: 'host-tab-2',
+          leafId: 'leaf-1',
+          title: 'Terminal 2',
+          terminal: 'pty-2',
+          status: 'ready',
+          isActive: true
+        },
+        publicationEpoch: 'epoch-1',
+        snapshotVersion: 2
+      }
+    })
+
+    await expect(Promise.all([automaticBootstrap, userCreate])).resolves.toEqual([true, true])
+    expect(
+      runtimeCall.mock.calls.filter(([args]) => args.method === 'session.tabs.createTerminal')
+    ).toHaveLength(1)
+    expect(
+      runtimeCall.mock.calls.filter(([args]) => args.method === 'session.tabs.list')
+    ).toHaveLength(1)
+
+    await expect(
+      createWebRuntimeSessionTerminal({
+        worktreeId: WORKTREE_ID,
+        environmentId: ENVIRONMENT_ID,
+        activate: false,
+        selectWorktree: false
+      })
+    ).resolves.toBe(true)
+    expect(
+      runtimeCall.mock.calls.filter(([args]) => args.method === 'session.tabs.createTerminal')
+    ).toHaveLength(2)
+  })
+
+  it('keeps explicit terminal commands independent of default create coalescing', async () => {
+    mocks.setState.mockImplementation(() => {})
+    const runtimeCall = vi.fn((args: { method: string }) => {
+      if (args.method === 'session.tabs.list') {
+        return Promise.resolve({ id: 'list', ok: true, result: makeSnapshot() })
+      }
+      return Promise.resolve({
+        id: 'create-terminal',
+        ok: true,
+        result: {
+          tab: {
+            type: 'terminal',
+            id: `host-tab-${runtimeCall.mock.calls.length}::leaf-1`,
+            parentTabId: `host-tab-${runtimeCall.mock.calls.length}`,
+            leafId: 'leaf-1',
+            title: 'Terminal',
+            terminal: `pty-${runtimeCall.mock.calls.length}`,
+            status: 'ready',
+            isActive: true
+          },
+          publicationEpoch: 'epoch-1',
+          snapshotVersion: 2
+        }
+      })
+    })
+    vi.stubGlobal('window', {
+      api: { runtimeEnvironments: { call: runtimeCall } }
+    })
+
+    await expect(
+      Promise.all([
+        createWebRuntimeSessionTerminal({
+          worktreeId: WORKTREE_ID,
+          environmentId: ENVIRONMENT_ID,
+          activate: false,
+          selectWorktree: false
+        }),
+        createWebRuntimeSessionTerminal({
+          worktreeId: WORKTREE_ID,
+          environmentId: ENVIRONMENT_ID,
+          command: 'pi',
+          activate: false,
+          selectWorktree: false
+        })
+      ])
+    ).resolves.toEqual([true, true])
+
+    expect(
+      runtimeCall.mock.calls.filter(([args]) => args.method === 'session.tabs.createTerminal')
+    ).toHaveLength(2)
   })
 
   it('can create a terminal without selecting the target worktree', async () => {

@@ -192,6 +192,19 @@ export function acceptReplayedWebSessionTabsSnapshot(
   }
 }
 
+export function isCurrentWebSessionTabsSnapshot(
+  snapshot: RuntimeMobileSessionTabsResult,
+  environmentId: string
+): boolean {
+  const current = latestSessionTabsSnapshotByWorktree.get(
+    sessionTabsFreshnessKey(environmentId, snapshot.worktree)
+  )
+  return (
+    current?.publicationEpoch === snapshot.publicationEpoch &&
+    current.snapshotVersion === snapshot.snapshotVersion
+  )
+}
+
 export function shouldApplyWebSessionTabsSnapshot(
   snapshot: RuntimeMobileSessionTabsResult,
   environmentId: string
@@ -244,11 +257,11 @@ export function shouldBootstrapInitialWebRuntimeTerminal(args: {
   event: SessionTabsStreamEvent
   activeWorktreeId: string
   requestedInitialTerminal: boolean
-  snapshotIsFresh: boolean
+  snapshotIsAuthoritative: boolean
   localTerminalCount: number
 }): boolean {
   return (
-    args.snapshotIsFresh &&
+    args.snapshotIsAuthoritative &&
     args.event.type === 'snapshot' &&
     args.event.tabs.length === 0 &&
     args.localTerminalCount === 0 &&
@@ -2711,7 +2724,9 @@ export function useWebSessionTabsSync(): void {
               event,
               activeWorktreeId,
               requestedInitialTerminal,
-              snapshotIsFresh: fresh,
+              // Why: parallel global/active subscriptions may deliver the same empty version; the accepted current pair is authoritative, unlike an older frame.
+              snapshotIsAuthoritative:
+                fresh || isCurrentWebSessionTabsSnapshot(event, environmentId),
               localTerminalCount
             })
             const shouldRespawnAfterWake = shouldRespawnWebRuntimeTerminalAfterWake({

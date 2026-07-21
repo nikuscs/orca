@@ -753,6 +753,104 @@ describe('createRemoteRuntimePtyTransport', () => {
     }
   })
 
+  it('recovers a mirrored handle that materializes after the first stream times out', async () => {
+    const { createRemoteRuntimePtyTransport } = await import('./remote-runtime-pty-transport')
+    const onConnect = vi.fn()
+    const onExit = vi.fn()
+    const onDisconnect = vi.fn()
+    const onPtyExit = vi.fn()
+    const renderedScreen: string[] = []
+    const transport = createRemoteRuntimePtyTransport('env-1', {
+      worktreeId: 'wt-1',
+      tabId: 'web-terminal-tab-1',
+      leafId: 'pane:1',
+      onPtyExit
+    })
+    transport.attach({
+      existingPtyId: 'remote:env-1@@terminal-survived',
+      cols: 80,
+      rows: 24,
+      callbacks: {
+        onConnect,
+        onExit,
+        onDisconnect,
+        onData: (data) => renderedScreen.push(data),
+        onReplayData: (data) => renderedScreen.push(data)
+      }
+    })
+    await vi.waitFor(() => expect(subscriptionSendBinary).toHaveBeenCalled())
+    const firstStreamId = latestSubscribePayload().streamId
+    runtimeCall.mockImplementation(async (args: { method: string }) =>
+      args.method === 'session.tabs.list'
+        ? {
+            ok: true,
+            result: {
+              worktree: 'wt-1',
+              publicationEpoch: 'epoch-1',
+              snapshotVersion: 2,
+              activeGroupId: null,
+              activeTabId: 'tab-1::pane:1',
+              activeTabType: 'terminal',
+              tabs: [
+                {
+                  type: 'terminal',
+                  id: 'tab-1::pane:1',
+                  parentTabId: 'tab-1',
+                  leafId: 'pane:1',
+                  title: 'Pi',
+                  isActive: true,
+                  status: 'ready',
+                  terminal: 'terminal-survived'
+                }
+              ]
+            }
+          }
+        : { ok: true, result: {} }
+    )
+
+    // The host owns the PTY and tab, but its restarted renderer has not mounted
+    // the leaf before the multiplex server's bounded wait expires.
+    subscriptionCallbacks?.onBinary?.(
+      encodeTerminalStreamFrame({
+        opcode: TerminalStreamOpcode.Error,
+        streamId: firstStreamId,
+        seq: 1,
+        payload: encodeTerminalStreamText('no_connected_pty')
+      })
+    )
+    subscriptionCallbacks?.onResponse({
+      ok: true,
+      result: { type: 'end', streamId: firstStreamId }
+    })
+
+    await vi.waitFor(() => {
+      const subscribedTerminals = subscriptionSendBinary.mock.calls
+        .map((call) => decodeTerminalStreamFrame(call[0]))
+        .flatMap((frame) => {
+          if (frame?.opcode !== TerminalStreamOpcode.Subscribe) {
+            return []
+          }
+          const payload = decodeTerminalStreamJson<{ terminal: string }>(frame.payload)
+          return payload ? [payload.terminal] : []
+        })
+      expect(subscribedTerminals).toEqual(['terminal-survived', 'terminal-survived'])
+    })
+    const recoveredStreamId = latestSubscribePayload().streamId
+    emitSnapshot(recoveredStreamId, 'recovered Pi screen')
+    expect(transport.sendInput('x')).toBe(true)
+    expect(transport.claimViewport?.(101, 33)).toBe(true)
+
+    expect(onConnect).toHaveBeenCalledOnce()
+    expect(onExit).not.toHaveBeenCalled()
+    expect(onDisconnect).not.toHaveBeenCalled()
+    expect(onPtyExit).not.toHaveBeenCalled()
+    expect(transport.getPtyId()).toBe('remote:env-1@@terminal-survived')
+    expect(transport.isConnected()).toBe(true)
+    expect(renderedScreen.at(-1)).toBe('recovered Pi screen')
+    await vi.waitFor(() => expect(latestFrameForOpcode(TerminalStreamOpcode.Input)).toBeTruthy())
+    expect(latestFrameForOpcode(TerminalStreamOpcode.ClaimViewport)).toBeTruthy()
+  })
+
   it('serializes same-handle snapshot recovery through the active reconnect', async () => {
     const { createRemoteRuntimePtyTransport } = await import('./remote-runtime-pty-transport')
     const transport = createRemoteRuntimePtyTransport('env-1', {
@@ -946,6 +1044,37 @@ describe('createRemoteRuntimePtyTransport', () => {
     expect(onPtyExit).not.toHaveBeenCalled()
     expect(transport.getPtyId()).toBe('remote:env-1@@terminal-reconnected')
     expect(transport.isConnected()).toBe(true)
+  })
+
+  it('still retires a non-mirrored terminal with no connected PTY', async () => {
+    const { createRemoteRuntimePtyTransport } = await import('./remote-runtime-pty-transport')
+    const onPtyExit = vi.fn()
+    const transport = createRemoteRuntimePtyTransport('env-1', {
+      worktreeId: 'wt-1',
+      tabId: 'local-runtime-tab-1',
+      leafId: 'pane:1',
+      onPtyExit
+    })
+
+    transport.attach({
+      existingPtyId: 'remote:env-1@@terminal-gone',
+      cols: 80,
+      rows: 24,
+      callbacks: {}
+    })
+    await vi.waitFor(() => expect(subscriptionSendBinary).toHaveBeenCalled())
+
+    subscriptionCallbacks?.onResponse({
+      ok: true,
+      result: {
+        type: 'error',
+        streamId: latestSubscribePayload().streamId,
+        message: 'no_connected_pty'
+      }
+    })
+
+    expect(onPtyExit).toHaveBeenCalledWith('remote:env-1@@terminal-gone')
+    expect(transport.getPtyId()).toBeNull()
   })
 
   it('still retires the regular TUI surface after an explicit terminal exit', async () => {
@@ -1253,7 +1382,11 @@ describe('createRemoteRuntimePtyTransport', () => {
     )
   })
 
-  it('maps reused host owners to their mirrored client tab identity', async () => {
+  it('refreshes the host snapshot before mapping a reused owner to the client projection', async () => {
+    const refreshWebRuntimeSessionTabsSnapshot = vi.fn().mockResolvedValue(undefined)
+    vi.doMock('../../runtime/web-runtime-session', () => ({
+      refreshWebRuntimeSessionTabsSnapshot
+    }))
     runtimeCall.mockResolvedValueOnce({
       ok: true,
       result: {
@@ -1282,6 +1415,9 @@ describe('createRemoteRuntimePtyTransport', () => {
         tabId: 'web-terminal-owner-tab',
         paneKey: 'web-terminal-owner-tab:11111111-1111-4111-8111-111111111111'
       }
+    })
+    expect(refreshWebRuntimeSessionTabsSnapshot).toHaveBeenCalledWith('env-1', 'wt-1', {
+      acceptCurrentVersion: true
     })
     expect(runtimeSubscribe).not.toHaveBeenCalled()
   })

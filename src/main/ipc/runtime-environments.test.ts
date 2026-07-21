@@ -1458,6 +1458,92 @@ describe('registerRuntimeEnvironmentHandlers', () => {
     expect(close).toHaveBeenCalled()
   })
 
+  it('closes renderer-owned subscriptions before a main-frame reload reuses the WebContents', async () => {
+    registerRuntimeEnvironmentHandlers(store as never)
+    const firstClose = vi.fn()
+    const secondClose = vi.fn()
+    subscribeRemoteRuntimeRequestMock
+      .mockResolvedValueOnce({
+        requestId: 'stream-before-reload',
+        close: firstClose,
+        sendBinary: vi.fn()
+      })
+      .mockResolvedValueOnce({
+        requestId: 'stream-after-reload',
+        close: secondClose,
+        sendBinary: vi.fn()
+      })
+
+    const add = handler<
+      { name: string; pairingCode: string },
+      { environment: { id: string; name: string } }
+    >('runtimeEnvironments:addFromPairingCode')
+    await add(null, { name: 'desk', pairingCode: pairingCode() })
+
+    const navigationHandler = vi.fn<(...args: unknown[]) => void>()
+    const renderGoneHandler = vi.fn<(...args: unknown[]) => void>()
+    const sender = {
+      id: 1,
+      isDestroyed: () => false,
+      send: vi.fn(),
+      once: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+        if (event === 'render-process-gone') {
+          renderGoneHandler.mockImplementation(listener)
+        }
+      }),
+      on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+        if (event === 'did-start-navigation') {
+          navigationHandler.mockImplementation(listener)
+        }
+      }),
+      removeListener: vi.fn()
+    }
+    const subscribe = handler<
+      {
+        selector: string
+        method: string
+        params?: unknown
+        subscriptionId?: string
+      },
+      { subscriptionId: string; requestId: string }
+    >('runtimeEnvironments:subscribe')
+
+    await subscribe(
+      { sender },
+      {
+        selector: 'desk',
+        method: 'terminal.multiplex',
+        subscriptionId: 'before-reload'
+      }
+    )
+    expect(sender.on).toHaveBeenCalledWith('did-start-navigation', expect.any(Function))
+
+    navigationHandler({}, 'file:///app/index.html#tab', true, true)
+    navigationHandler({}, 'file:///embedded.html', false, false)
+    expect(firstClose).not.toHaveBeenCalled()
+
+    navigationHandler({}, 'file:///app/index.html', false, true)
+    expect(firstClose).toHaveBeenCalledTimes(1)
+
+    await expect(
+      subscribe(
+        { sender },
+        {
+          selector: 'desk',
+          method: 'terminal.multiplex',
+          subscriptionId: 'after-reload'
+        }
+      )
+    ).resolves.toEqual({
+      subscriptionId: 'after-reload',
+      requestId: 'stream-after-reload'
+    })
+    expect(secondClose).not.toHaveBeenCalled()
+
+    renderGoneHandler({}, { reason: 'crashed' })
+    expect(secondClose).toHaveBeenCalledTimes(1)
+  })
+
   it('closes a streaming subscription that resolves after the sender is destroyed', async () => {
     registerRuntimeEnvironmentHandlers(store as never)
     const close = vi.fn()

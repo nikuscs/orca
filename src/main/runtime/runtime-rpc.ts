@@ -39,6 +39,7 @@ import {
   decodeTerminalStreamFrame,
   type TerminalStreamFrame
 } from '../../shared/terminal-stream-protocol'
+import { startSpan } from '../observability/tracer'
 
 const DEFAULT_WS_PORT = 6768
 
@@ -389,8 +390,7 @@ const MOBILE_RPC_METHOD_ALLOWLIST = new Set([
   'worktree.resolveMrBase',
   'worktree.resolvePrBase',
   'worktree.rm',
-  'worktree.set',
-  'worktree.sleep'
+  'worktree.set'
 ])
 
 // Why: single classifier for long-poll requests (handlers that block on an external event), shared by counter/abort/keepalive. See §3.1.
@@ -1031,6 +1031,19 @@ export class OrcaRuntimeRpcServer {
     if (!device) {
       reply(JSON.stringify(this.buildError(request.id, 'unauthorized', 'Invalid device token')))
       return
+    }
+    if (request.method === 'worktree.sleep') {
+      const worktree = (request.params as { worktree?: unknown } | undefined)?.worktree
+      const span = startSpan('runtime.rpc.worktree-sleep-request', {
+        kind: 'server',
+        attributes: {
+          'rpc.client_kind': device.scope,
+          'rpc.device_id': device.deviceId,
+          'rpc.worktree': typeof worktree === 'string' ? worktree : 'missing',
+          'rpc.blocked': device.scope === 'mobile'
+        }
+      })
+      span.end()
     }
     if (device.scope === 'mobile' && !MOBILE_RPC_METHOD_ALLOWLIST.has(request.method)) {
       reply(

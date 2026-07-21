@@ -11,6 +11,7 @@ import {
 } from '../activity/activity-terminal-portal'
 import TerminalPane from './TerminalPane'
 import { closeTerminalTab } from '../terminal/terminal-tab-actions'
+import { shouldDeselectEmptyWorktreeAfterTabClose } from '../terminal/empty-worktree-close-navigation'
 import { shouldMountBackgroundWorktreeTab } from '../terminal/background-terminal-worktree-mount'
 import { useNativeChatToggleShortcut } from '../native-chat/use-native-chat-toggle-shortcut'
 import { shouldDeferParkedPtyExitTabClose } from './terminal-parked-tab-watchers'
@@ -331,7 +332,7 @@ const TerminalPaneOverlayLayer = memo(function TerminalPaneOverlayLayer({
       return
     }
     const { renderableTabCount } = reconcileWorktreeTabModel(worktreeId)
-    if (renderableTabCount === 0) {
+    if (shouldDeselectEmptyWorktreeAfterTabClose({ state, worktreeId, renderableTabCount })) {
       setActiveWorktree(null)
     }
   }, [reconcileWorktreeTabModel, setActiveWorktree, worktreeId])

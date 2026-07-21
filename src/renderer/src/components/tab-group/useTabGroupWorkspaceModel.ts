@@ -22,6 +22,7 @@ import {
   isWebRuntimeSessionActive
 } from '../../runtime/web-runtime-session'
 import { closeTerminalTab } from '../terminal/terminal-tab-actions'
+import { shouldDeselectEmptyWorktreeAfterTabClose } from '../terminal/empty-worktree-close-navigation'
 import { openTabBarEntry, type TabCreateEntryArgs } from '../tab-bar/tab-create-entry-action'
 import { openMobileEmulatorTab } from '@/lib/open-mobile-emulator-tab'
 import { ensureSimulatorTab, getSimulatorTabForWorktree } from '@/lib/ensure-simulator-tab'
@@ -216,7 +217,7 @@ export function useTabGroupWorkspaceModel({
     }
     // Why: split-group closes bypass legacy Terminal.tsx; deselect the emptied worktree here or the window goes blank instead of landing.
     const { renderableTabCount } = state.reconcileWorktreeTabModel(worktreeId)
-    if (renderableTabCount === 0) {
+    if (shouldDeselectEmptyWorktreeAfterTabClose({ state, worktreeId, renderableTabCount })) {
       setActiveWorktree(null)
     }
   }, [setActiveWorktree, worktreeId])

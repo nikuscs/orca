@@ -27,6 +27,7 @@ import {
   applyWebSessionTabsSnapshot,
   applyWebSessionTabsSnapshots,
   clearWebSessionTabsTrackingForEnvironment,
+  isCurrentWebSessionTabsSnapshot,
   resolveHostSessionTabIdForWebSessionTab,
   resetWebSessionTabsSnapshotFreshnessForTests,
   shouldSyncAllRuntimeSessionTabs,
@@ -489,10 +490,30 @@ describe('applyWebSessionTabsSnapshot', () => {
         event: { type: 'snapshot', ...staleEmpty },
         activeWorktreeId: WT,
         requestedInitialTerminal: false,
-        snapshotIsFresh: staleIsFresh,
+        snapshotIsAuthoritative: staleIsFresh || isCurrentWebSessionTabsSnapshot(staleEmpty, ENV),
         localTerminalCount: 0
       })
     ).toBe(false)
+  })
+
+  it('bootstraps from an empty current snapshot already accepted by a parallel subscription', () => {
+    const currentEmpty = makeSnapshot([], {
+      activeGroupId: null,
+      activeTabId: null,
+      activeTabType: null
+    })
+
+    expect(shouldApplyWebSessionTabsSnapshot(currentEmpty, ENV)).toBe(true)
+    expect(isCurrentWebSessionTabsSnapshot(currentEmpty, ENV)).toBe(true)
+    expect(
+      shouldBootstrapInitialWebRuntimeTerminal({
+        event: { type: 'snapshot', ...currentEmpty },
+        activeWorktreeId: WT,
+        requestedInitialTerminal: false,
+        snapshotIsAuthoritative: isCurrentWebSessionTabsSnapshot(currentEmpty, ENV),
+        localTerminalCount: 0
+      })
+    ).toBe(true)
   })
 
   it('does not bootstrap a terminal from a fresh empty snapshot when local terminals already exist', () => {
@@ -507,7 +528,7 @@ describe('applyWebSessionTabsSnapshot', () => {
         event: { type: 'snapshot', ...freshEmpty },
         activeWorktreeId: WT,
         requestedInitialTerminal: false,
-        snapshotIsFresh: true,
+        snapshotIsAuthoritative: true,
         localTerminalCount: 1
       })
     ).toBe(false)
@@ -1118,7 +1139,6 @@ describe('applyWebSessionTabsSnapshot', () => {
     ) as Partial<WebSessionTabsSyncState>
 
     const mirroredId = patch.tabsByWorktree?.[WT]?.[0]?.id
-    console.error('PATCH tabs', JSON.stringify(patch.tabsByWorktree?.[WT]))
     expect(patch.tabsByWorktree?.[WT]?.[0]?.viewMode).toBe('chat')
     expect(
       patch.unifiedTabsByWorktree?.[WT]?.find((tab) => tab.entityId === mirroredId)?.viewMode

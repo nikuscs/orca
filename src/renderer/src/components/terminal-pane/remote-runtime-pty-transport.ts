@@ -62,6 +62,10 @@ function isRemoteTerminalGoneMessage(message: string): boolean {
   )
 }
 
+function isRemoteTerminalMaterializingMessage(message: string): boolean {
+  return message.includes('no_connected_pty')
+}
+
 /** PTY transport for a renderer pane backed by a terminal on a remote Orca runtime, over runtime RPC plus the multiplexed stream. */
 export function createRemoteRuntimePtyTransport(
   runtimeEnvironmentId: string,
@@ -613,8 +617,18 @@ export function createRemoteRuntimePtyTransport(
       }
       return
     }
+    if (
+      isRemoteTerminalMaterializingMessage(message) &&
+      tabId &&
+      isWebTerminalSurfaceTabId(tabId)
+    ) {
+      // Why: a restarted host can publish its canonical mirror before the renderer leaf mounts; the same live handle must retry instead of becoming an inert loading pane.
+      closeMultiplexedStream()
+      scheduleResubscribeAfterTransportClose()
+      return
+    }
     if (isRemoteTerminalGoneMessage(message)) {
-      // Why: an explicit terminal-gone response is lifecycle evidence, unlike a replaceable stale handle seen during reconnect.
+      // Why: explicit terminal-gone evidence retires regular terminals; mirrored no-PTY races recover above from host inventory.
       retireRemoteTerminalId()
       return
     }
@@ -938,6 +952,14 @@ export function createRemoteRuntimePtyTransport(
         })
         const existingOwner = created.terminal.existingAgentSessionOwner
         if (existingOwner) {
+          if (destroyed) {
+            return
+          }
+          const { refreshWebRuntimeSessionTabsSnapshot } =
+            await import('../../runtime/web-runtime-session')
+          await refreshWebRuntimeSessionTabsSnapshot(currentRuntimeEnvironmentId, worktreeId, {
+            acceptCurrentVersion: true
+          })
           if (destroyed) {
             return
           }
