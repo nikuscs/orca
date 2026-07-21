@@ -15,9 +15,11 @@ import type {
   TerminalPreviewDataPayload
 } from '../shared/terminal-preview'
 import type {
+  SessionTabCloseRequest,
+  SessionTabCloseResponse,
   TerminalTabCloseRequest,
   TerminalTabCloseResponse
-} from '../shared/terminal-tab-close'
+} from '../shared/renderer-tab-close'
 import type {
   LocalLogTailChangedPayload,
   LocalLogTailReadArgs,
@@ -2966,6 +2968,8 @@ export type PreloadApi = {
     ) => () => void
     onTerminalTabCloseRequest: (callback: (request: TerminalTabCloseRequest) => void) => () => void
     respondTerminalTabClose: (response: TerminalTabCloseResponse) => void
+    onSessionTabCloseRequest: (callback: (request: SessionTabCloseRequest) => void) => () => void
+    respondSessionTabClose: (response: SessionTabCloseResponse) => void
     onSleepWorktree: (callback: (data: { worktreeId: string }) => void) => () => void
     onResumeSleepingAgents: (callback: (data: { worktreeId: string }) => void) => () => void
     onTerminalZoom: (callback: (direction: 'in' | 'out' | 'reset') => void) => () => void
