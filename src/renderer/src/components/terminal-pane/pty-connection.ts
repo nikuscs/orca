@@ -4711,7 +4711,7 @@ export function connectPanePty(
           : {}),
         ...(coldRestoreOverride ? { launchToken: coldRestoreOverride.launchToken } : {}),
         ...(coldRestoreOverride ? { launchAgent: coldRestoreOverride.agent } : {}),
-        ...(shouldDeclareHiddenAtSpawn() ? { initiallyHidden: true } : {}),
+        ...(shouldMarkTransportInitiallyHidden() ? { initiallyHidden: true } : {}),
         callbacks: outputCallbacks.callbacks
       })
 
@@ -4722,6 +4722,40 @@ export function connectPanePty(
         })
       const trackedPromise: Promise<string | null> = Promise.resolve(spawnedRaw)
         .then(async (spawnedPtyId) => {
+          if (
+            spawnedPtyId &&
+            typeof spawnedPtyId === 'object' &&
+            spawnedPtyId.existingAgentSessionOwner
+          ) {
+            const owner = spawnedPtyId.existingAgentSessionOwner
+            const state = useAppStore.getState()
+            const ownerTabExists = (state.tabsByWorktree[deps.worktreeId] ?? []).some(
+              (tab) => tab.id === owner.tabId
+            )
+            if (ownerTabExists) {
+              const sleepingRecord = getSleepingRecordForPane(state)
+              if (sleepingRecord) {
+                clearSleepingRecordProviderDuplicates(state, sleepingRecord)
+              }
+            }
+            if (ownerTabExists && owner.tabId !== deps.tabId) {
+              state.closeTab(deps.tabId, {
+                reason: 'pty-exit',
+                captureRecentlyClosed: false
+              })
+              useAppStore.getState().setActiveTab(owner.tabId)
+            } else if (!ownerTabExists) {
+              deps.onPtyErrorRef?.current(
+                pane.id,
+                'This agent session is already running in another terminal.'
+              )
+            }
+            const gen = await preSignalPromise
+            if (typeof gen === 'number') {
+              void window.api.pty.clearPendingPaneSerializer(cacheKey, gen).catch(() => {})
+            }
+            return null
+          }
           if (outputCallbacks.generation !== transportStreamGeneration) {
             const gen = await preSignalPromise
             if (typeof gen === 'number') {
@@ -5383,6 +5417,11 @@ export function connectPanePty(
         !disposed &&
         !shouldWritePtyOutputForeground(deps.isVisibleRef.current)
       )
+    }
+
+    function shouldMarkTransportInitiallyHidden(): boolean {
+      // Why: remote subscriptions use this bit for viewport ownership, while local PTYs use it for query-delivery gating.
+      return runtimeEnvironmentId ? !deps.isVisibleRef.current : shouldDeclareHiddenAtSpawn()
     }
 
     // ── Hidden-delivery gate sync (Phase 4) ─────────────────────────────
@@ -7568,7 +7607,7 @@ export function connectPanePty(
                 ? { launchToken: coldRestoreStartup.launchToken }
                 : {}),
               ...(coldRestoreStartup?.agent ? { launchAgent: coldRestoreStartup.agent } : {}),
-              ...(shouldDeclareHiddenAtSpawn() ? { initiallyHidden: true } : {}),
+              ...(shouldMarkTransportInitiallyHidden() ? { initiallyHidden: true } : {}),
               callbacks: outputCallbacks.callbacks
             })
             void Promise.resolve(reattachPromise)
@@ -7780,7 +7819,7 @@ export function connectPanePty(
           : {}),
         ...(coldRestoreStartup?.launchToken ? { launchToken: coldRestoreStartup.launchToken } : {}),
         ...(coldRestoreStartup?.agent ? { launchAgent: coldRestoreStartup.agent } : {}),
-        ...(shouldDeclareHiddenAtSpawn() ? { initiallyHidden: true } : {}),
+        ...(shouldMarkTransportInitiallyHidden() ? { initiallyHidden: true } : {}),
         callbacks: outputCallbacks.callbacks
       })
 
@@ -7886,6 +7925,7 @@ export function connectPanePty(
           existingPtyId: attachPtyId,
           cols,
           rows,
+          ...(shouldMarkTransportInitiallyHidden() ? { initiallyHidden: true } : {}),
           callbacks: outputCallbacks.callbacks
         })
         const attachedPtyId = transport.getPtyId() ?? attachPtyId
@@ -7936,6 +7976,7 @@ export function connectPanePty(
               existingPtyId: spawnedPtyId,
               cols,
               rows,
+              ...(shouldMarkTransportInitiallyHidden() ? { initiallyHidden: true } : {}),
               callbacks: outputCallbacks.callbacks
             })
             const attachedPtyId = transport.getPtyId() ?? spawnedPtyId
@@ -8040,6 +8081,8 @@ export function connectPanePty(
   return {
     syncProcessTracking() {
       agentCompletionCoordinator.startProcessTracking()
+      // Why: reconnecting background viewers must remain passive instead of stealing the shared PTY grid.
+      transport.setViewportClaimEnabled?.(deps.isVisibleRef.current)
       // Why: the hidden-delivery gate must follow every pane visibility flip.
       syncHiddenRendererPtyDelivery()
     },

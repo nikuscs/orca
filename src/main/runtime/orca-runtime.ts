@@ -154,6 +154,7 @@ import {
 } from '../../shared/execution-host'
 import type {
   AgentProviderSessionMetadata,
+  LiveAgentSessionOwner,
   SleepingAgentLaunchConfig
 } from '../../shared/agent-session-resume'
 import type { RuntimeClientEvent } from '../../shared/runtime-client-events'
@@ -1303,7 +1304,11 @@ type RuntimePtyController = {
     sessionId?: string
     persistHostSessionBinding?: boolean
     terminalColorQueryReplies?: { foreground?: string; background?: string }
-  }): Promise<{ id: string; wslDistro?: string }>
+  }): Promise<{
+    id: string
+    wslDistro?: string
+    existingAgentSessionOwner?: LiveAgentSessionOwner
+  }>
   write(ptyId: string, data: string): boolean
   kill(ptyId: string): boolean
   stopAndWait?(
@@ -10238,7 +10243,10 @@ export class OrcaRuntimeService {
       this.remoteDesktopOwners.set(ptyId, subscriptionKey)
       return this.applyRemoteDesktopLayout(ptyId)
     }
-    return true
+    // Why: ordinary fit updates from the connected owner must resize its PTY without letting passive peers steal ownership.
+    return this.remoteDesktopOwners.get(ptyId) === subscriptionKey
+      ? this.applyRemoteDesktopLayout(ptyId)
+      : true
   }
 
   claimRemoteDesktopViewer(ptyId: string, subscriptionKey: string): Promise<boolean> {
@@ -19836,6 +19844,26 @@ export class OrcaRuntimeService {
           ? { persistHostSessionBinding: true }
           : {})
       })
+      if (result.existingAgentSessionOwner) {
+        const owner = result.existingAgentSessionOwner
+        const ownerPty = this.ptysById.get(owner.ptyId)
+        if (!ownerPty) {
+          throw new Error('The existing agent terminal is no longer available.')
+        }
+        const ownerHandle =
+          this.handleByLeafKey.get(this.getLeafKey(owner.tabId, owner.leafId)) ??
+          this.handleByPtyId.get(owner.ptyId) ??
+          this.issuePtyHandle(ownerPty)
+        return {
+          handle: ownerHandle,
+          tabId: owner.tabId,
+          paneKey: owner.paneKey,
+          ptyId: owner.ptyId,
+          worktreeId: ownerPty.worktreeId,
+          title: this.tabs.get(owner.tabId)?.title ?? ownerPty.title,
+          surface: 'visible'
+        }
+      }
       this.registerPreAllocatedHandleForPty(result.id, preAllocatedHandle)
       if (result.wslDistro) {
         this.preparePtyExecutionContext(result.id, result.wslDistro)
